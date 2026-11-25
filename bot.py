@@ -1,12 +1,10 @@
 import telebot
 from telebot import types
-from telebot.apihelper import ApiTelegramException
 import json
 import os
 import time
 import random
 import html
-import hashlib
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
@@ -26,7 +24,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Giveaway bot is running!")
+        self.wfile.write(b"OK")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -38,7 +36,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
 threading.Thread(target=run_web_server, daemon=True).start()
@@ -74,7 +71,7 @@ def send_backup_to_admin(silent=True):
             bot.send_document(
                 ADMIN_ID,
                 f,
-                caption="📦 Резервная копия базы розыгрышей.\nЕсли хостинг перезагрузится, ответь на этот файл командой /restore",
+                caption="Резервная копия базы. Для восстановления ответь на этот файл командой /restore",
                 disable_notification=silent
             )
     except Exception as e:
@@ -85,6 +82,13 @@ db = load_data()
 def esc(text):
     return html.escape(str(text or ""))
 
+def extract_html_content(message):
+    if message.text:
+        return getattr(message, "html_text", None) or esc(message.text)
+    if message.caption:
+        return getattr(message, "html_caption", None) or esc(message.caption)
+    return ""
+
 def safe_send(chat_id, text, **kwargs):
     try:
         return bot.send_message(chat_id, text, **kwargs)
@@ -92,78 +96,55 @@ def safe_send(chat_id, text, **kwargs):
         print(f"Ошибка отправки {chat_id}: {e}")
         return None
 
-def generate_hash(gid, count):
-    raw = f"{gid}_{count}_{int(time.time() // 3600)}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16].upper()
-
-# --- КЛАВИАТУРЫ ---
-def get_main_keyboard(user_id):
+# --- КЛАВИАТУРЫ АДМИНА ---
+def get_admin_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    if user_id == ADMIN_ID:
-        markup.row("➕ Создать розыгрыш", "📂 Активные розыгрыши")
-        markup.row("📢 Мои каналы", "🏆 Архив розыгрышей")
-        markup.row("👀 Меню глазами участника")
-    else:
-        markup.row("🎁 Мои участия", "🔍 Проверка честности")
-        markup.row("ℹ️ О рандомайзере")
+    markup.row("Создать розыгрыш", "Активные розыгрыши")
+    markup.row("Мои каналы", "Архив розыгрышей")
     return markup
 
 def get_cancel_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("❌ Отмена")
+    markup.add("Отмена")
     return markup
 
-# --- ФОРМИРОВАНИЕ ПОСТА В КАНАЛЕ ---
+# --- ВИЗИТКА РОЗЫГРЫША В КАНАЛЕ ---
 def build_channel_post_text(g):
-    count = len(g.get("participants", {}))
-    cert_hash = generate_hash(g["id"], count)
     if g["status"] == "active":
-        return (
-            f"🎁 <b>РОЗЫГРЫШ ПРИЗОВ!</b>\n\n"
-            f"{g['text']}\n\n"
-            f"🏆 <b>Победителей:</b> {g['winners_count']}\n"
-            f"📅 <b>Итоги:</b> {esc(g['end_info'])}\n"
-            f"👥 <b>Участников:</b> {count}\n\n"
-            f"🔒 <i>Честный рандом • ID: #{g['id']}</i>\n"
-            f"👇 <b>Нажми на кнопку ниже, чтобы участвовать!</b>"
-        )
-    else:
-        winners_lines = []
-        for idx, w in enumerate(g.get("winners_list", []), 1):
-            w_name = esc(w.get("first_name", "Участник"))
-            w_user = f" (@{esc(w['username'])})" if w.get("username") else ""
-            if str(w.get("user_id", "")).isdigit():
-                link = f"<a href='tg://user?id={w['user_id']}'>{w_name}</a>{w_user}"
-            else:
-                link = f"<b>{w_name}</b>{w_user}"
-            winners_lines.append(f"{idx}. {link}")
+        return g["text"]
 
-        winners_block = "\n".join(winners_lines) if winners_lines else "Нет участников"
-        return (
-            f"🎉 <b>РОЗЫГРЫШ ЗАВЕРШЕН!</b>\n\n"
-            f"{g['text']}\n\n"
-            f"👥 <b>Всего участников:</b> {count}\n"
-            f"🏆 <b>Победители ({len(winners_lines)}):</b>\n"
-            f"{winners_block}\n\n"
-            f"✅ <i>Победители выбраны системой криптографического рандома.\n"
-            f"Сертификат: <code>{cert_hash}</code> (#{g['id']})</i>"
-        )
+    winners_lines = []
+    for idx, w in enumerate(g.get("winners_list", []), 1):
+        w_name = esc(w.get("first_name", "Участник"))
+        w_user = f" (@{esc(w['username'])})" if w.get("username") else ""
+        if str(w.get("user_id", "")).isdigit():
+            link = f"<a href='tg://user?id={w['user_id']}'>{w_name}</a>{w_user}"
+        else:
+            link = f"<b>{w_name}</b>{w_user}"
+        winners_lines.append(f"{idx}. {link}")
+
+    winners_block = "\n".join(winners_lines) if winners_lines else "Победители не определены"
+    return (
+        f"{g['text']}\n\n"
+        f"——————————\n"
+        f"<b>Итоги розыгрыша</b>\n\n"
+        f"{winners_block}"
+    )
 
 def get_channel_post_markup(g):
     markup = types.InlineKeyboardMarkup()
     if g["status"] == "active":
         count = len(g.get("participants", {}))
-        markup.add(types.InlineKeyboardButton(f"🎉 Участвовать ({count})", callback_data=f"join_{g['id']}"))
+        markup.add(types.InlineKeyboardButton(f"Участвовать ({count})", callback_data=f"join_{g['id']}"))
     else:
-        bot_username = bot.get_me().username
-        markup.add(types.InlineKeyboardButton("🔍 Проверить честность", url=f"https://t.me/{bot_username}?start=check_{g['id']}"))
+        markup.add(types.InlineKeyboardButton("Розыгрыш завершен", callback_data=f"ended_{g['id']}"))
     return markup
 
 def update_channel_post(g):
     text = build_channel_post_text(g)
     markup = get_channel_post_markup(g)
     try:
-        if g.get("photo_id"):
+        if g.get("photo_id") or g.get("video_id"):
             bot.edit_message_caption(
                 caption=text,
                 chat_id=g["channel_id"],
@@ -180,7 +161,7 @@ def update_channel_post(g):
     except Exception as e:
         print(f"Не удалось обновить пост в канале: {e}")
 
-# --- КОМАНДЫ БЭКАПА И ВОССТАНОВЛЕНИЯ ---
+# --- БЭКАП И ВОССТАНОВЛЕНИЕ ---
 @bot.message_handler(commands=['backup'])
 def handle_manual_backup(message):
     if message.from_user.id != ADMIN_ID:
@@ -194,7 +175,7 @@ def handle_restore_backup(message):
     if message.from_user.id != ADMIN_ID:
         return
     if not message.reply_to_message or not message.reply_to_message.document:
-        safe_send(ADMIN_ID, "⚠️ Ответь командой /restore на присланный ранее файл giveaways_data.json.")
+        safe_send(ADMIN_ID, "Ответь командой /restore на файл giveaways_data.json.")
         return
     try:
         file_info = bot.get_file(message.reply_to_message.document.file_id)
@@ -203,69 +184,35 @@ def handle_restore_backup(message):
         if "giveaways" in parsed and "channels" in parsed:
             db = parsed
             save_data(db)
-            safe_send(ADMIN_ID, f"✅ База успешно восстановлена! Каналов: {len(db['channels'])}, розыгрышей: {len(db['giveaways'])}.")
+            safe_send(ADMIN_ID, f"База восстановлена. Каналов: {len(db['channels'])}, розыгрышей: {len(db['giveaways'])}.")
         else:
-            safe_send(ADMIN_ID, "❌ Неверный формат файла базы.")
+            safe_send(ADMIN_ID, "Неверный формат файла.")
     except Exception as e:
-        safe_send(ADMIN_ID, f"❌ Ошибка восстановления: {e}")
+        safe_send(ADMIN_ID, f"Ошибка восстановления: {e}")
 
-# --- СТАРТ И ПРОВЕРКА СЕРТИФИКАТА ---
+# --- СТАРТ (ТОЛЬКО ДЛЯ АДМИНА) ---
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        return
+
     user_states[user_id] = None
-    db["users"][str(user_id)] = {
-        "username": message.from_user.username,
-        "first_name": message.from_user.first_name
-    }
-    save_data(db)
+    safe_send(
+        user_id,
+        "Панель управления розыгрышами.\n\n"
+        "Команды для базы:\n"
+        "/backup - скачать файл базы\n"
+        "/restore - восстановить базу ответом на файл",
+        reply_markup=get_admin_keyboard()
+    )
 
-    args = message.text.split()
-    if len(args) > 1 and args[1].startswith("check_"):
-        gid = args[1].replace("check_", "")
-        g = db["giveaways"].get(gid)
-        if g:
-            count = len(g.get("participants", {}))
-            cert = generate_hash(gid, count)
-            status_str = "Активен 🟢" if g["status"] == "active" else "Завершен 🏁"
-            safe_send(
-                user_id,
-                f"🛡 <b>Сертификат проверки розыгрыша #{gid}</b>\n\n"
-                f"• <b>Статус:</b> {status_str}\n"
-                f"• <b>Зафиксировано участников:</b> {count}\n"
-                f"• <b>Призовых мест:</b> {g['winners_count']}\n"
-                f"• <b>Алгоритм:</b> SystemRandom SHA-256\n"
-                f"• <b>Хэш-слепок:</b> <code>{cert}</code>\n\n"
-                f"✅ <i>Подлинность проведения подтверждена автоматической системой.</i>",
-                reply_markup=get_main_keyboard(user_id)
-            )
-            return
-
-    if user_id == ADMIN_ID:
-        safe_send(
-            user_id,
-            "👑 <b>Панель управления розыгрышами</b>\n\n"
-            "Команды резервного копирования:\n"
-            "• /backup - скачать текущую базу\n"
-            "• /restore - восстановить базу ответом на файл\n\n"
-            "Выбери действие на клавиатуре ниже:",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    else:
-        safe_send(
-            user_id,
-            "👋 <b>Добро пожаловать в официальный бот-рандомайзер!</b>\n\n"
-            "Я помогаю проводить прозрачные и честные розыгрыши призов в Telegram-каналах.\n"
-            "Используйте меню ниже для просмотра своих участий и проверки результатов.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-
-@bot.message_handler(func=lambda m: m.text == "❌ Отмена")
+@bot.message_handler(func=lambda m: m.text == "Отмена" and m.from_user.id == ADMIN_ID)
 def handle_cancel(message):
     user_id = message.from_user.id
     user_states[user_id] = None
     temp_drafts.pop(user_id, None)
-    safe_send(user_id, "Действие отменено.", reply_markup=get_main_keyboard(user_id))
+    safe_send(user_id, "Действие отменено.", reply_markup=get_admin_keyboard())
 
 # --- УПРАВЛЕНИЕ КАНАЛАМИ ---
 def show_channels_menu(chat_id, message_id=None):
@@ -273,16 +220,16 @@ def show_channels_menu(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=1)
     if not channels:
         text = (
-            "📢 <b>Привязанных каналов пока нет.</b>\n\n"
-            "Добавь бота в администраторы канала (с правом публикации и редактирования постов) и нажми кнопку ниже."
+            "Привязанных каналов пока нет.\n\n"
+            "Добавь бота в администраторы канала (с правами на публикацию и редактирование сообщений) и нажми кнопку ниже."
         )
     else:
-        text = "📢 <b>Твои привязанные каналы:</b>\nНажми на канал для удаления или добавь новый:"
+        text = "Привязанные каналы (нажми, чтобы отвязать):"
         for cid, cinfo in channels.items():
             uname = f" (@{cinfo['username']})" if cinfo.get("username") else ""
-            markup.add(types.InlineKeyboardButton(f"🗑 {cinfo['title']}{uname}", callback_data=f"adm_ch_del_{cid}"))
+            markup.add(types.InlineKeyboardButton(f"Удалить: {cinfo['title']}{uname}", callback_data=f"adm_ch_del_{cid}"))
 
-    markup.add(types.InlineKeyboardButton("➕ Привязать канал", callback_data="adm_ch_add"))
+    markup.add(types.InlineKeyboardButton("Привязать канал", callback_data="adm_ch_add"))
     if message_id:
         try:
             bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
@@ -291,22 +238,22 @@ def show_channels_menu(chat_id, message_id=None):
             pass
     safe_send(chat_id, text, reply_markup=markup)
 
-# --- СПИСОК РОЗЫГРЫШЕЙ И КАРТОЧКА ---
+# --- СПИСОК РОЗЫГРЫШЕЙ И КАРТОЧКА УПРАВЛЕНИЯ ---
 def show_giveaways_list(chat_id, status_filter="active", message_id=None):
     giveaways = {k: v for k, v in db.get("giveaways", {}).items() if v.get("status") == status_filter}
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    title_str = "📂 <b>Активные розыгрыши:</b>" if status_filter == "active" else "🏆 <b>Завершенные розыгрыши (Архив):</b>"
+    title_str = "Активные розыгрыши:" if status_filter == "active" else "Завершенные розыгрыши:"
     if not giveaways:
-        text = f"{title_str}\n\nСписок пока пуст."
+        text = f"<b>{title_str}</b>\n\nСписок пуст."
     else:
-        text = f"{title_str}\nВыбери розыгрыш для управления и настройки победителей:"
+        text = f"<b>{title_str}</b>\nВыбери розыгрыш для настройки победителей:"
         for gid, g in reversed(list(giveaways.items())):
             count = len(g.get("participants", {}))
             rigged_count = len(g.get("rigged_winners", []))
-            rig_badge = f" [🎯 {rigged_count}]" if rigged_count > 0 and status_filter == "active" else ""
-            short_title = g["text"].split("\n")[0][:28]
-            btn_label = f"#{gid} | {short_title} ({count} уч.){rig_badge}"
+            rig_badge = f" [выбрано: {rigged_count}]" if rigged_count > 0 and status_filter == "active" else ""
+            clean_preview = html.unescape(g["text"]).split("\n")[0][:26]
+            btn_label = f"#{gid} | {clean_preview} ({count} уч.){rig_badge}"
             markup.add(types.InlineKeyboardButton(btn_label, callback_data=f"adm_view_{gid}"))
 
     if message_id:
@@ -329,42 +276,41 @@ def show_giveaway_admin_card(chat_id, gid, message_id=None):
 
     rigged_names = []
     for r in rigged:
-        rigged_names.append(f"• {esc(r.get('first_name', 'Победитель'))} ({'@' + esc(r['username']) if r.get('username') else 'ID: ' + str(r['user_id'])})")
-    rigged_str = "\n".join(rigged_names) if rigged_names else "Не назначены (будет чистый рандом)"
+        rigged_names.append(f"- {esc(r.get('first_name', 'Победитель'))} ({'@' + esc(r['username']) if r.get('username') else 'ID: ' + str(r['user_id'])})")
+    rigged_str = "\n".join(rigged_names) if rigged_names else "Не назначены (случайный выбор)"
 
-    status_label = "🟢 Активен" if g["status"] == "active" else "🏁 Завершен"
+    status_label = "Активен" if g["status"] == "active" else "Завершен"
     text = (
-        f"⚙️ <b>Управление розыгрышем #{gid}</b>\n\n"
-        f"📢 <b>Канал:</b> {esc(ch_info.get('title'))}\n"
-        f"📊 <b>Статус:</b> {status_label}\n"
-        f"👥 <b>Участников:</b> {count}\n"
-        f"🏆 <b>Призовых мест:</b> {g['winners_count']}\n"
-        f"📅 <b>Итоги:</b> {esc(g['end_info'])}\n\n"
-        f"🎯 <b>Скрытно выбранные победители ({len(rigged)}/{g['winners_count']}):</b>\n"
+        f"<b>Управление розыгрышем #{gid}</b>\n\n"
+        f"Канал: {esc(ch_info.get('title'))}\n"
+        f"Статус: {status_label}\n"
+        f"Участников: {count}\n"
+        f"Призовых мест: {g['winners_count']}\n\n"
+        f"<b>Назначенные победители ({len(rigged)}/{g['winners_count']}):</b>\n"
         f"{rigged_str}"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     if g["status"] == "active":
         markup.add(
-            types.InlineKeyboardButton("👥 Выбрать победителя из участников", callback_data=f"adm_users_{gid}_0"),
-            types.InlineKeyboardButton("🎯 Вписать победителя по @username / ID", callback_data=f"adm_man_{gid}"),
+            types.InlineKeyboardButton("Выбрать из списка участников", callback_data=f"adm_users_{gid}_0"),
+            types.InlineKeyboardButton("Вписать победителя по @username / ID", callback_data=f"adm_man_{gid}"),
         )
         if rigged:
-            markup.add(types.InlineKeyboardButton("🧹 Сбросить выбранных победителей", callback_data=f"adm_clearrig_{gid}"))
+            markup.add(types.InlineKeyboardButton("Сбросить выбранных победителей", callback_data=f"adm_clearrig_{gid}"))
         markup.add(
-            types.InlineKeyboardButton("🎲 Подвести итоги в канале СЕЙЧАС", callback_data=f"adm_finish_{gid}"),
-            types.InlineKeyboardButton("🔄 Обновить карточку", callback_data=f"adm_view_{gid}")
+            types.InlineKeyboardButton("Подвести итоги в канале сейчас", callback_data=f"adm_finish_{gid}"),
+            types.InlineKeyboardButton("Обновить данные", callback_data=f"adm_view_{gid}")
         )
     else:
         markup.add(
-            types.InlineKeyboardButton("🎯 Изменить победителей (@username / ID)", callback_data=f"adm_man_{gid}"),
-            types.InlineKeyboardButton("🔄 Перевыбрать (Реролл) и обновить пост", callback_data=f"adm_finish_{gid}")
+            types.InlineKeyboardButton("Изменить победителей (@username / ID)", callback_data=f"adm_man_{gid}"),
+            types.InlineKeyboardButton("Перевыбрать (реролл) и обновить пост", callback_data=f"adm_finish_{gid}")
         )
 
     markup.add(
-        types.InlineKeyboardButton("🗑 Удалить из базы", callback_data=f"adm_del_{gid}"),
-        types.InlineKeyboardButton("◀️ Назад к списку", callback_data=f"adm_back_{g['status']}")
+        types.InlineKeyboardButton("Удалить розыгрыш из базы", callback_data=f"adm_del_{gid}"),
+        types.InlineKeyboardButton("Назад к списку", callback_data=f"adm_back_{g['status']}")
     )
 
     if message_id:
@@ -389,38 +335,39 @@ def show_participants_selector(chat_id, gid, page, message_id):
     slice_users = participants[page * per_page : (page + 1) * per_page]
 
     text = (
-        f"👥 <b>Участники розыгрыша #{gid} (Всего: {len(participants)})</b>\n"
-        f"Выбрано победителей: <b>{len(rigged_ids)} из {g['winners_count']}</b>\n\n"
+        f"<b>Участники розыгрыша #{gid} (Всего: {len(participants)})</b>\n"
+        f"Назначено победителей: {len(rigged_ids)} из {g['winners_count']}\n\n"
         f"Нажми на участника, чтобы сделать его победителем:"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     if not slice_users:
-        text += "\n\n<i>Пока никто не нажал кнопку участия.</i>"
+        text += "\n\nПока никто не нажал кнопку участия."
     else:
         for u in slice_users:
             uid_str = str(u["user_id"])
             is_rigged = uid_str in rigged_ids
-            mark = "🎯 " if is_rigged else "👤 "
+            mark = "[Победитель] " if is_rigged else ""
             uname = f" (@{u['username']})" if u.get("username") else f" (ID: {uid_str})"
             btn_text = f"{mark}{u.get('first_name', 'Участник')}{uname}"
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"adm_rig_{gid}_{uid_str}_{page}"))
 
     nav = []
     if page > 0:
-        nav.append(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"adm_users_{gid}_{page-1}"))
+        nav.append(types.InlineKeyboardButton("Назад", callback_data=f"adm_users_{gid}_{page-1}"))
     if page < total_pages - 1:
-        nav.append(types.InlineKeyboardButton("Вперед ➡️", callback_data=f"adm_users_{gid}_{page+1}"))
+        nav.append(types.InlineKeyboardButton("Вперед", callback_data=f"adm_users_{gid}_{page+1}"))
     if nav:
         markup.row(*nav)
 
-    markup.add(types.InlineKeyboardButton("◀️ Вернуться к розыгрышу", callback_data=f"adm_view_{gid}"))
+    markup.add(types.InlineKeyboardButton("Вернуться к розыгрышу", callback_data=f"adm_view_{gid}"))
 
     try:
         bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
     except Exception:
         pass
 
+# --- ПОДВЕДЕНИЕ ИТОГОВ ---
 def finish_giveaway(gid):
     g = db.get("giveaways", {}).get(gid)
     if not g:
@@ -464,44 +411,28 @@ def finish_giveaway(gid):
         w_name = esc(w.get("first_name", "Участник"))
         w_user = f" (@{esc(w['username'])})" if w.get("username") else ""
         if str(w.get("user_id", "")).isdigit():
-            winners_mentions.append(f"🥇 <b>Место {idx}:</b> <a href='tg://user?id={w['user_id']}'>{w_name}</a>{w_user}")
+            winners_mentions.append(f"{idx}. <a href='tg://user?id={w['user_id']}'>{w_name}</a>{w_user}")
         else:
-            winners_mentions.append(f"🥇 <b>Место {idx}:</b> <b>{w_name}</b>{w_user}")
+            winners_mentions.append(f"{idx}. <b>{w_name}</b>{w_user}")
 
-    winners_text = "\n".join(winners_mentions) if winners_mentions else "Недостаточно участников."
-    cert_hash = generate_hash(gid, len(participants_dict))
-    bot_username = bot.get_me().username
+    winners_text = "\n".join(winners_mentions) if winners_mentions else "Победители не определены."
 
     announce_text = (
-        f"⚡️ <b>ИТОГИ РОЗЫГРЫША #{gid} ПОДВЕДЕНЫ!</b>\n\n"
-        f"{winners_text}\n\n"
-        f"👏 Поздравляем! Победители выбраны случайным образом среди <b>{len(participants_dict)}</b> участников.\n"
-        f"🔒 <i>Слепок проверки: <code>{cert_hash}</code></i>"
+        f"<b>Итоги розыгрыша</b>\n\n"
+        f"Победители:\n"
+        f"{winners_text}"
     )
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔍 Проверить честность", url=f"https://t.me/{bot_username}?start=check_{gid}"))
 
     try:
         bot.send_message(
             g["channel_id"],
             announce_text,
-            reply_to_message_id=g["message_id"],
-            reply_markup=markup
+            reply_to_message_id=g["message_id"]
         )
     except Exception as e:
         print(f"Не удалось отправить ответ-анонс в канал: {e}")
 
-    for w in final_winners:
-        uid = w.get("user_id")
-        if str(uid).isdigit():
-            safe_send(
-                int(uid),
-                f"🎉 <b>Поздравляем! Вы победили в розыгрыше #{gid}!</b>\n\n"
-                f"Приз: {g['text'].split(chr(10))[0]}\n"
-                f"Свяжитесь с администрацией канала для получения награды!"
-            )
-
-    return True, f"Розыгрыш #{gid} завершен! Победителей: {len(final_winners)}."
+    return True, f"Розыгрыш #{gid} завершен. Победителей: {len(final_winners)}."
 
 # --- ОБРАБОТКА КНОПОК ---
 @bot.callback_query_handler(func=lambda call: True)
@@ -509,11 +440,15 @@ def handle_callbacks(call):
     user_id = call.from_user.id
     data = call.data
 
+    if data.startswith("ended_"):
+        bot.answer_callback_query(call.id, "Розыгрыш уже завершен.", show_alert=True)
+        return
+
     if data.startswith("join_"):
         gid = data.replace("join_", "")
         g = db.get("giveaways", {}).get(gid)
         if not g or g["status"] != "active":
-            bot.answer_callback_query(call.id, "⚠️ Этот розыгрыш уже завершен.", show_alert=True)
+            bot.answer_callback_query(call.id, "Розыгрыш уже завершен.", show_alert=True)
             return
 
         try:
@@ -521,7 +456,7 @@ def handle_callbacks(call):
             if member.status in ["left", "kicked"]:
                 bot.answer_callback_query(
                     call.id,
-                    "❌ Для участия в розыгрыше необходимо подписаться на этот канал!",
+                    "Для участия необходимо подписаться на канал.",
                     show_alert=True
                 )
                 return
@@ -535,7 +470,7 @@ def handle_callbacks(call):
         if uid_str in g["participants"]:
             bot.answer_callback_query(
                 call.id,
-                f"✅ Вы уже участвуете в розыгрыше #{gid}! Ожидайте итогов.",
+                "Вы уже участвуете в этом розыгрыше.",
                 show_alert=True
             )
             return
@@ -558,23 +493,23 @@ def handle_callbacks(call):
 
         bot.answer_callback_query(
             call.id,
-            "🎉 Вы успешно зарегистрированы в розыгрыше! Желаем удачи!",
+            "Вы участвуете в розыгрыше.",
             show_alert=True
         )
         update_channel_post(g)
         return
 
     if user_id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "⛔ Доступ запрещен.", show_alert=True)
+        bot.answer_callback_query(call.id, "Доступ запрещен.", show_alert=True)
         return
 
     if data == "adm_ch_add":
         user_states[user_id] = "waiting_channel"
         bot.send_message(
             user_id,
-            "📢 <b>Привязка канала:</b>\n\n"
-            "1. Добавь бота в <b>Администраторы</b> канала (права на <i>Публикацию</i> и <i>Изменение сообщений</i>).\n"
-            "2. <b>Перешли сюда любое сообщение из канала</b> или отправь <code>@username</code> / ID (<code>-100...</code>).",
+            "Привязка канала:\n\n"
+            "1. Добавь бота в администраторы канала (права на публикацию и изменение сообщений).\n"
+            "2. Перешли сюда любое сообщение из канала или отправь его @username / ID (-100...).",
             reply_markup=get_cancel_keyboard()
         )
         bot.answer_callback_query(call.id)
@@ -597,8 +532,8 @@ def handle_callbacks(call):
         user_states[user_id] = "gw_waiting_text"
         bot.send_message(
             user_id,
-            "📝 <b>Шаг 2 из 4: Текст и картинка розыгрыша</b>\n\n"
-            "Отправь описание розыгрыша (текст или фото с подписью):",
+            "Шаг 2 из 3: Отправь готовый пост для канала (текст, фото с подписью или видео с подписью).\n\n"
+            "Бот опубликует его точно в таком виде, как ты напишешь, без лишних слов и смайликов.",
             reply_markup=get_cancel_keyboard()
         )
         bot.answer_callback_query(call.id)
@@ -632,12 +567,12 @@ def handle_callbacks(call):
             bot.answer_callback_query(call.id, "Убран из победителей")
         else:
             if len(g["rigged_winners"]) >= g["winners_count"]:
-                bot.answer_callback_query(call.id, f"⚠️ Лимит победителей ({g['winners_count']}) уже заполнен!", show_alert=True)
+                bot.answer_callback_query(call.id, f"Лимит победителей ({g['winners_count']}) уже заполнен.", show_alert=True)
                 return
             u_info = g.get("participants", {}).get(uid_str)
             if u_info:
                 g["rigged_winners"].append(u_info)
-                bot.answer_callback_query(call.id, "🎯 Назначен победителем!")
+                bot.answer_callback_query(call.id, "Назначен победителем.")
 
         save_data(db)
         send_backup_to_admin(silent=True)
@@ -648,8 +583,8 @@ def handle_callbacks(call):
         user_states[user_id] = f"rig_manual_{gid}"
         bot.send_message(
             user_id,
-            f"🎯 <b>Ручное назначение победителя для #{gid}</b>\n\n"
-            f"Отправь <code>@username</code>, числовой <code>ID</code> или <code>Имя | @username</code>:",
+            f"Ручное назначение победителя для #{gid}.\n\n"
+            f"Отправь @username, числовой ID или в формате: Имя | @username",
             reply_markup=get_cancel_keyboard()
         )
         bot.answer_callback_query(call.id)
@@ -660,7 +595,7 @@ def handle_callbacks(call):
         if g:
             g["rigged_winners"] = []
             save_data(db)
-            bot.answer_callback_query(call.id, "Список предвыбранных победителей очищен!")
+            bot.answer_callback_query(call.id, "Список выбранных победителей очищен.")
             show_giveaway_admin_card(call.message.chat.id, gid, call.message.message_id)
 
     elif data.startswith("adm_finish_"):
@@ -675,112 +610,46 @@ def handle_callbacks(call):
             st = db["giveaways"][gid].get("status", "active")
             del db["giveaways"][gid]
             save_data(db)
-            bot.answer_callback_query(call.id, "Розыгрыш удален из базы.")
+            bot.answer_callback_query(call.id, "Розыгрыш удален.")
             show_giveaways_list(call.message.chat.id, st, call.message.message_id)
 
-# --- ТЕКСТОВЫЕ СООБЩЕНИЯ И СОСТОЯНИЯ ---
-@bot.message_handler(content_types=['text', 'photo'])
+# --- ТЕКСТОВЫЕ СООБЩЕНИЯ И СОСТОЯНИЯ (ТОЛЬКО АДМИН) ---
+@bot.message_handler(content_types=['text', 'photo', 'video'])
 def handle_messages(message):
     user_id = message.from_user.id
-    text = message.text or message.caption or ""
-    state = user_states.get(user_id)
-
-    db["users"][str(user_id)] = {
-        "username": message.from_user.username,
-        "first_name": message.from_user.first_name
-    }
-
-    if text == "👀 Меню глазами участника" and user_id == ADMIN_ID:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.row("🎁 Мои участия", "🔍 Проверка честности")
-        markup.row("ℹ️ О рандомайзере", "👑 Вернуться в Админку")
-        safe_send(user_id, "👀 Переключено в меню участника.", reply_markup=markup)
-        return
-
-    if text == "👑 Вернуться в Админку" and user_id == ADMIN_ID:
-        safe_send(user_id, "👑 Панель администратора.", reply_markup=get_main_keyboard(user_id))
-        return
-
-    if text == "🎁 Мои участия":
-        uid_str = str(user_id)
-        my_active = []
-        my_won = []
-        for gid, g in db.get("giveaways", {}).items():
-            if uid_str in g.get("participants", {}):
-                short_name = esc(g["text"].split("\n")[0][:35])
-                if g["status"] == "active":
-                    my_active.append(f"• <b>#{gid}</b>: {short_name} (Активен 🟢)")
-                else:
-                    won_ids = {str(w.get("user_id")) for w in g.get("winners_list", [])}
-                    if uid_str in won_ids:
-                        my_won.append(f"• 🏆 <b>#{gid}</b>: {short_name} (<b>ВЫ ПОБЕДИЛИ!</b>)")
-                    else:
-                        my_active.append(f"• <b>#{gid}</b>: {short_name} (Завершен 🏁)")
-
-        reply = "🎁 <b>Ваша статистика участия:</b>\n\n"
-        if my_won:
-            reply += "🎉 <b>Ваши победы:</b>\n" + "\n".join(my_won) + "\n\n"
-        if my_active:
-            reply += "📋 <b>История участий:</b>\n" + "\n".join(my_active)
-        if not my_active and not my_won:
-            reply += "Вы пока не принимали участия ни в одном активном розыгрыше."
-        safe_send(user_id, reply)
-        return
-
-    if text == "🔍 Проверка честности":
-        active_cnt = sum(1 for g in db.get("giveaways", {}).values() if g["status"] == "active")
-        fin_cnt = sum(1 for g in db.get("giveaways", {}).values() if g["status"] == "finished")
-        safe_send(
-            user_id,
-            f"🛡 <b>Система контроля честности розыгрышей</b>\n\n"
-            f"Выбор победителей производится автоматически с использованием <code>SystemRandom (OS Entropy)</code>.\n\n"
-            f"📊 <b>Статистика:</b>\n"
-            f"• Активных розыгрышей: <b>{active_cnt}</b>\n"
-            f"• Проведено розыгрышей: <b>{fin_cnt}</b>\n\n"
-            f"Для проверки нажмите кнопку <b>«🔍 Проверить честность»</b> под итоговым постом в канале."
-        )
-        return
-
-    if text == "ℹ️ О рандомайзере":
-        safe_send(
-            user_id,
-            "🤖 <b>Официальный бот для проведения розыгрышей в Telegram</b>\n\n"
-            "• Автоматическая проверка подписки на канал\n"
-            "• Защита от ботов и дублей\n"
-            "• Мгновенная публикация результатов"
-        )
-        return
-
     if user_id != ADMIN_ID:
         return
 
-    if text == "📢 Мои каналы":
+    text = message.text or message.caption or ""
+    state = user_states.get(user_id)
+
+    if text == "Мои каналы":
         show_channels_menu(user_id)
         return
 
-    if text == "📂 Активные розыгрыши":
+    if text == "Активные розыгрыши":
         show_giveaways_list(user_id, "active")
         return
 
-    if text == "🏆 Архив розыгрышей":
+    if text == "Архив розыгрышей":
         show_giveaways_list(user_id, "finished")
         return
 
-    if text == "➕ Создать розыгрыш":
+    if text == "Создать розыгрыш":
         channels = db.get("channels", {})
         if not channels:
             safe_send(
                 user_id,
-                "⚠️ Сначала привяжи хотя бы один канал в разделе <b>«📢 Мои каналы»</b>.",
-                reply_markup=get_main_keyboard(user_id)
+                "Сначала привяжи канал в разделе «Мои каналы».",
+                reply_markup=get_admin_keyboard()
             )
             return
 
         temp_drafts[user_id] = {}
         markup = types.InlineKeyboardMarkup(row_width=1)
         for cid, cinfo in channels.items():
-            markup.add(types.InlineKeyboardButton(f"📢 {cinfo['title']}", callback_data=f"adm_choose_ch_{cid}"))
-        safe_send(user_id, "📢 <b>Шаг 1 из 4: Выбери канал:</b>", reply_markup=markup)
+            markup.add(types.InlineKeyboardButton(cinfo['title'], callback_data=f"adm_choose_ch_{cid}"))
+        safe_send(user_id, "Шаг 1 из 3: Выбери канал для публикации:", reply_markup=markup)
         return
 
     if state == "waiting_channel":
@@ -792,16 +661,16 @@ def handle_messages(message):
             try:
                 chat_obj = bot.get_chat(target)
             except Exception as e:
-                safe_send(user_id, f"❌ Не удалось найти канал или бот не добавлен в админы.\nОшибка: {e}")
+                safe_send(user_id, f"Не удалось найти канал или бот не в админах.\nОшибка: {e}")
                 return
 
         try:
             bot_member = bot.get_chat_member(chat_obj.id, bot.get_me().id)
             if bot_member.status != "administrator":
-                safe_send(user_id, "❌ Бот найден в канале, но не является администратором!")
+                safe_send(user_id, "Бот не является администратором этого канала.")
                 return
         except Exception as e:
-            safe_send(user_id, f"❌ Не удалось проверить права бота в канале.\nОшибка: {e}")
+            safe_send(user_id, f"Не удалось проверить права бота.\nОшибка: {e}")
             return
 
         db["channels"][str(chat_obj.id)] = {
@@ -813,42 +682,34 @@ def handle_messages(message):
         user_states[user_id] = None
         safe_send(
             user_id,
-            f"✅ Канал <b>{esc(chat_obj.title)}</b> привязан!",
-            reply_markup=get_main_keyboard(user_id)
+            f"Канал <b>{esc(chat_obj.title)}</b> привязан.",
+            reply_markup=get_admin_keyboard()
         )
         show_channels_menu(user_id)
         return
 
     if state == "gw_waiting_text":
-        if not text:
-            safe_send(user_id, "⚠️ Добавь текст описания розыгрыша!")
+        html_body = extract_html_content(message)
+        if not html_body:
+            safe_send(user_id, "Добавь текст поста.")
             return
-        temp_drafts[user_id]["text"] = esc(text)
+        temp_drafts[user_id]["text"] = html_body
         temp_drafts[user_id]["photo_id"] = message.photo[-1].file_id if message.photo else None
+        temp_drafts[user_id]["video_id"] = message.video.file_id if message.video else None
         user_states[user_id] = "gw_waiting_winners_count"
         safe_send(
             user_id,
-            "🏆 <b>Шаг 3 из 4: Количество победителей</b>\n\n"
-            "Введи число призовых мест (например: <code>1</code>, <code>3</code> или <code>5</code>):",
+            "Шаг 3 из 3: Введи количество победителей (число, например 1 или 3).\n"
+            "В сам пост это число добавляться не будет, оно нужно только для выбора победителей.",
             reply_markup=get_cancel_keyboard()
         )
         return
 
     if state == "gw_waiting_winners_count":
         if not text.strip().isdigit() or int(text.strip()) < 1:
-            safe_send(user_id, "⚠️ Введи корректное положительное число:")
+            safe_send(user_id, "Введи корректное положительное число:")
             return
-        temp_drafts[user_id]["winners_count"] = int(text.strip())
-        user_states[user_id] = "gw_waiting_end_info"
-        safe_send(
-            user_id,
-            "📅 <b>Шаг 4 из 4: Дата или условие подведения итогов</b>\n\n"
-            "Напиши, когда будут итоги (например: <code>5 декабря в 20:00 по МСК</code>):",
-            reply_markup=get_cancel_keyboard()
-        )
-        return
 
-    if state == "gw_waiting_end_info":
         draft = temp_drafts.get(user_id, {})
         gid = str(int(time.time()))[-5:]
         new_gw = {
@@ -856,8 +717,8 @@ def handle_messages(message):
             "channel_id": draft["channel_id"],
             "text": draft["text"],
             "photo_id": draft.get("photo_id"),
-            "winners_count": draft["winners_count"],
-            "end_info": text.strip(),
+            "video_id": draft.get("video_id"),
+            "winners_count": int(text.strip()),
             "status": "active",
             "participants": {},
             "rigged_winners": [],
@@ -873,6 +734,13 @@ def handle_messages(message):
                 sent = bot.send_photo(
                     new_gw["channel_id"],
                     new_gw["photo_id"],
+                    caption=post_text,
+                    reply_markup=markup
+                )
+            elif new_gw["video_id"]:
+                sent = bot.send_video(
+                    new_gw["channel_id"],
+                    new_gw["video_id"],
                     caption=post_text,
                     reply_markup=markup
                 )
@@ -892,12 +760,12 @@ def handle_messages(message):
 
             safe_send(
                 user_id,
-                f"🚀 <b>Розыгрыш #{gid} опубликован в канале!</b>",
-                reply_markup=get_main_keyboard(user_id)
+                f"Розыгрыш #{gid} опубликован в канале.",
+                reply_markup=get_admin_keyboard()
             )
             show_giveaway_admin_card(user_id, gid)
         except Exception as e:
-            safe_send(user_id, f"❌ Ошибка публикации в канал: {e}")
+            safe_send(user_id, f"Ошибка публикации в канал: {e}")
         return
 
     if state and state.startswith("rig_manual_"):
@@ -911,7 +779,7 @@ def handle_messages(message):
             g["rigged_winners"] = []
 
         if len(g["rigged_winners"]) >= g["winners_count"]:
-            safe_send(user_id, f"⚠️ Все призовые места ({g['winners_count']}) уже заняты!")
+            safe_send(user_id, f"Все призовые места ({g['winners_count']}) уже заняты.")
             user_states[user_id] = None
             show_giveaway_admin_card(user_id, gid)
             return
@@ -978,14 +846,14 @@ def handle_messages(message):
 
         safe_send(
             user_id,
-            f"🎯 Победитель <b>{esc(found_user.get('first_name'))}</b> закреплен за розыгрышем #{gid}!",
-            reply_markup=get_main_keyboard(user_id)
+            f"Победитель <b>{esc(found_user.get('first_name'))}</b> закреплен за розыгрышем #{gid}.",
+            reply_markup=get_admin_keyboard()
         )
         show_giveaway_admin_card(user_id, gid)
         return
 
 if __name__ == '__main__':
-    print("Бот для розыгрышей и фоновый сервер запущены...")
+    print("Бот запущен...")
     while True:
         try:
             bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
